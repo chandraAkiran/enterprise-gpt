@@ -1,48 +1,68 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 
 import LogoutButton from "./LogoutButton";
-
+import { createClient } from "../lib/supabase/client";
 
 export default function Sidebar() {
+    const [isAdmin, setIsAdmin] = useState(false);
+
+    useEffect(() => {
+        async function checkAdminRole() {
+            const supabase = createClient();
+
+            const {
+                data: { user },
+            } = await supabase.auth.getUser();
+
+            if (!user) {
+                setIsAdmin(false);
+                return;
+            }
+
+            const { data: profile, error } = await supabase
+                .from("profiles")
+                .select("role")
+                .eq("id", user.id)
+                .single();
+
+            if (!error && profile?.role === "admin") {
+                setIsAdmin(true);
+            } else {
+                setIsAdmin(false);
+            }
+        }
+
+        checkAdminRole();
+    }, []);
 
     return (
-
-        <aside className="
-            w-64
-            min-h-screen
-            bg-gray-950
-            text-white
-            p-6
-            flex
-            flex-col
-        ">
-
+        <aside
+            className="
+                w-64
+                min-h-screen
+                bg-gray-950
+                text-white
+                p-6
+                flex
+                flex-col
+            "
+        >
+            {/* Title */}
             <div className="mb-10">
-
-                <h1 className="
-                    text-xl
-                    font-bold
-                ">
+                <h1 className="text-xl font-bold">
                     Enterprise GPT
                 </h1>
 
-                <p className="
-                    text-gray-400
-                    text-sm
-                    mt-1
-                ">
+                <p className="text-gray-400 text-sm mt-1">
                     AI Knowledge Assistant
                 </p>
-
             </div>
 
-
-            <nav className="
-                space-y-2
-                flex-1
-            ">
+            {/* Navigation */}
+            <nav className="space-y-2 flex-1">
 
                 <Link
                     href="/dashboard"
@@ -57,7 +77,6 @@ export default function Sidebar() {
                     Dashboard
                 </Link>
 
-
                 <Link
                     href="/chat"
                     className="
@@ -70,7 +89,6 @@ export default function Sidebar() {
                 >
                     AI Chat
                 </Link>
-
 
                 <Link
                     href="/documents"
@@ -85,11 +103,25 @@ export default function Sidebar() {
                     Documents
                 </Link>
 
+                {/* Only admins can see this link */}
+                {isAdmin && (
+                    <Link
+                        href="/admin"
+                        className="
+                            block
+                            px-4
+                            py-3
+                            rounded-lg
+                            hover:bg-gray-800
+                        "
+                    >
+                        Admin Panel
+                    </Link>
+                )}
+
             </nav>
 
-
             <LogoutButton />
-
         </aside>
     );
 }
