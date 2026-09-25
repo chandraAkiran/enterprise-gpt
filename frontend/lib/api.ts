@@ -237,3 +237,54 @@ export async function getDashboard() {
 
     return response.json();
 }
+
+export async function getAdminDocuments() {
+    const headers = await getAuthHeaders();
+
+    const response = await fetch(
+        `${API_URL}/admin/documents`,
+        {
+            method: "GET",
+            headers,
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json().catch(() => null);
+
+        throw new Error(
+            error?.detail ||
+            "Failed to load admin documents"
+        );
+    }
+
+    return response.json();
+}
+
+
+export async function adminDeleteDocument(
+    documentId: string
+) {
+    const headers = await getAuthHeaders();
+
+    const response = await fetch(
+        `${API_URL}/admin/documents/${documentId}`,
+        {
+            method: "DELETE",
+            headers,
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response
+            .json()
+            .catch(() => null);
+
+        throw new Error(
+            error?.detail ||
+            "Failed to delete document"
+        );
+    }
+
+    return response.json();
+}
