@@ -309,25 +309,34 @@ async def upload_document(
         # ---------------------------------------------
 
         database_result = (
-            supabase
-            .table("documents")
-            .insert(
-                {
-                    "id":
-                        document_id,
+    supabase
+    .table("documents")
+    .insert(
+        {
+            "id":
+                document_id,
 
-                    "user_id":
-                        user_id,
+            "user_id":
+                user_id,
 
-                    "file_name":
-                        file.filename,
+            "file_name":
+                file.filename,
 
-                    "file_path":
-                        storage_path,
-                }
-            )
-            .execute()
-        )
+            "file_path":
+                storage_path,
+
+            "page_count":
+                len(pages),
+
+            "chunk_count":
+                stored_chunks,
+
+            "status":
+                "ready",
+        }
+    )
+    .execute()
+)
 
         # ---------------------------------------------
         # Success

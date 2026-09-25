@@ -87,7 +87,7 @@ export default function DocumentsPage() {
             setMessage(
 
                 `Uploaded successfully: ${
-                    result.filename
+                    result.file_name
                 }`
             );
 
