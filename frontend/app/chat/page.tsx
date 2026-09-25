@@ -177,7 +177,7 @@ export default function ChatPage() {
             }
 
             await saveChatMessage(
-                currentSessionId,
+                currentSessionId!,
                 "user",
                 currentQuestion
             );
@@ -188,7 +188,7 @@ export default function ChatPage() {
                 );
 
             await saveChatMessage(
-                currentSessionId,
+                currentSessionId!,
                 "assistant",
                 result.answer
             );
