@@ -1,627 +1,262 @@
 import uuid
 
-from pathlib import Path
-
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    Depends,
-    HTTPException
-)
-
-from fastapi.middleware.cors import (
-    CORSMiddleware
-)
-
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from auth import get_current_user, supabase
+from config import DOCUMENT_DIR
+from ingestion.pdf_loader import extract_pdf_pages
+from ingestion.chunker import create_chunks
+from rag.embeddings import generate_embedding
+from rag.vector_store import add_documents, delete_document
+from rag.rag_engine import ask_question
 
-from auth import (
-    get_current_user,
-    supabase
-)
-
-
-from config import (
-    DOCUMENT_DIR
-)
-
-
-from ingestion.pdf_loader import (
-    extract_pdf_pages
-)
-
-
-from ingestion.chunker import (
-    create_chunks
-)
-
-
-from rag.embeddings import (
-    generate_embedding
-)
-
-
-from rag.vector_store import (
-    add_documents,
-    delete_document
-)
-
-
-from rag.rag_engine import (
-    ask_question
-)
-
-
-# =====================================================
-# APP
-# =====================================================
 
 app = FastAPI(
-
     title="Enterprise GPT API",
-
-    version="1.0.0"
+    version="1.0.0",
 )
-
-
-# =====================================================
-# CORS
-# =====================================================
 
 app.add_middleware(
-
     CORSMiddleware,
-
     allow_origins=[
-        "http://localhost:3000", 
-	"https://enterprise-gpt-self.vercel.app"
+        "http://localhost:3000",
+        "https://enterprise-gpt-self.vercel.app",
     ],
-
     allow_credentials=True,
-
     allow_methods=["*"],
-
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 
-# =====================================================
-# Request model
-# =====================================================
-
 class ChatRequest(BaseModel):
-
     question: str
 
 
-# =====================================================
-# HOME
-# =====================================================
-
 @app.get("/")
 def home():
-
     return {
-
-        "message":
-            "Enterprise GPT API is running",
-
-        "status":
-            "success"
+        "message": "Enterprise GPT API is running",
+        "status": "success",
     }
 
-
-# =====================================================
-# UPLOAD PDF
-# =====================================================
 
 @app.post("/upload")
 async def upload_document(
-
     file: UploadFile = File(...),
-
-    user=Depends(get_current_user)
-
+    user=Depends(get_current_user),
 ):
-
-    # -----------------------------------------
-    # Validate file
-    # -----------------------------------------
-
     if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is missing")
 
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
-
             status_code=400,
-
-            detail="Filename is missing"
+            detail="Only PDF files are supported",
         )
 
+    user_id = str(user.id)
+    document_id = str(uuid.uuid4())
 
-    if not file.filename.lower().endswith(
-        ".pdf"
-    ):
-
-        raise HTTPException(
-
-            status_code=400,
-
-            detail="Only PDF files are supported"
-        )
-
-
-    # -----------------------------------------
-    # User ID
-    # -----------------------------------------
-
-    user_id = str(
-        user.id
-    )
-
-
-    # -----------------------------------------
-    # Document ID
-    # -----------------------------------------
-
-    document_id = str(
-        uuid.uuid4()
-    )
-
-
-    # -----------------------------------------
-    # Safe filename
-    # -----------------------------------------
-
-    safe_filename = (
-
-        f"{user_id}_"
-        f"{document_id}_"
-        f"{file.filename}"
-    )
-
-
-    file_path = (
-        DOCUMENT_DIR /
-        safe_filename
-    )
-
-
-    # -----------------------------------------
-    # Save PDF
-    # -----------------------------------------
+    safe_filename = f"{user_id}_{document_id}_{file.filename}"
+    file_path = DOCUMENT_DIR / safe_filename
 
     contents = await file.read()
 
+    with open(file_path, "wb") as output_file:
+        output_file.write(contents)
 
-    with open(
-        file_path,
-        "wb"
-    ) as output_file:
+    storage_path = f"{user_id}/{document_id}_{file.filename}"
 
-        output_file.write(
-            contents
-        )
-
-
-    # -----------------------------------------
-    # Database record
-    # -----------------------------------------
-
-    supabase.table(
-        "documents"
-    ).insert({
-
-        "id":
-            document_id,
-
-        "user_id":
-            user_id,
-
-        "file_name":
-            file.filename,
-
-        "file_path":
-            str(file_path),
-
-        "status":
-            "processing"
-
-    }).execute()
-
+    storage_uploaded = False
+    database_record_created = False
 
     try:
-
-        # -------------------------------------
-        # Extract pages
-        # -------------------------------------
-
-        pages = extract_pdf_pages(
-            file_path
+        supabase.storage.from_("documents").upload(
+            path=storage_path,
+            file=contents,
+            file_options={"content-type": "application/pdf"},
         )
+        storage_uploaded = True
 
+        supabase.table("documents").insert({
+            "id": document_id,
+            "user_id": user_id,
+            "file_name": file.filename,
+            "file_path": storage_path,
+            "status": "processing",
+        }).execute()
+        database_record_created = True
 
-        # -------------------------------------
-        # Create chunks
-        # -------------------------------------
-
-        chunks = create_chunks(
-            pages
-        )
-
-
-        # -------------------------------------
-        # Create embeddings
-        # -------------------------------------
+        pages = extract_pdf_pages(file_path)
+        chunks = create_chunks(pages)
 
         embeddings = []
-
-
         for chunk in chunks:
-
-            embedding = generate_embedding(
-
-                chunk["text"]
-            )
-
-            embeddings.append(
-                embedding
-            )
-
-
-        # -------------------------------------
-        # Save vectors
-        # -------------------------------------
+            embeddings.append(generate_embedding(chunk["text"]))
 
         chunk_count = add_documents(
-
             chunks=chunks,
-
             embeddings=embeddings,
-
             user_id=user_id,
-
-            document_id=document_id
+            document_id=document_id,
         )
 
-
-        # -------------------------------------
-        # Update DB
-        # -------------------------------------
-
-        supabase.table(
-            "documents"
-        ).update({
-
-            "page_count":
-                len(pages),
-
-            "chunk_count":
-                chunk_count,
-
-            "status":
-                "ready"
-
+        supabase.table("documents").update({
+            "page_count": len(pages),
+            "chunk_count": chunk_count,
+            "status": "ready",
         }).eq(
-            "id",
-            document_id
+            "id", document_id
         ).eq(
-            "user_id",
-            user_id
+            "user_id", user_id
         ).execute()
-
 
         return {
-
-            "message":
-                "Document uploaded successfully",
-
-            "document_id":
-                document_id,
-
-            "filename":
-                file.filename,
-
-            "pages":
-                len(pages),
-
-            "chunks":
-                chunk_count
+            "message": "Document uploaded successfully",
+            "document_id": document_id,
+            "filename": file.filename,
+            "pages": len(pages),
+            "chunks": chunk_count,
         }
 
-
     except Exception as error:
-
-        supabase.table(
-            "documents"
-        ).update({
-
-            "status":
-                "failed"
-
-        }).eq(
-            "id",
-            document_id
-        ).execute()
-
+        if database_record_created:
+            try:
+                supabase.table("documents").update({
+                    "status": "failed",
+                }).eq(
+                    "id", document_id
+                ).eq(
+                    "user_id", user_id
+                ).execute()
+            except Exception:
+                pass
+        elif storage_uploaded:
+            try:
+                supabase.storage.from_("documents").remove([storage_path])
+            except Exception:
+                pass
 
         raise HTTPException(
-
             status_code=500,
-
-            detail=str(error)
+            detail=str(error),
         )
 
+    finally:
+        if file_path.exists():
+            file_path.unlink()
 
-# =====================================================
-# CHAT
-# =====================================================
 
 @app.post("/chat")
 def chat(
-
     request: ChatRequest,
-
-    user=Depends(get_current_user)
-
+    user=Depends(get_current_user),
 ):
-
-    user_id = str(
-        user.id
-    )
-
+    user_id = str(user.id)
 
     if not request.question.strip():
-
         raise HTTPException(
-
             status_code=400,
-
-            detail=
-                "Question cannot be empty"
+            detail="Question cannot be empty",
         )
 
-
-    result = ask_question(
-
-        question=
-            request.question,
-
-        user_id=
-            user_id
+    return ask_question(
+        question=request.question,
+        user_id=user_id,
     )
 
-
-    return result
-
-
-# =====================================================
-# GET DOCUMENTS
-# =====================================================
 
 @app.get("/documents")
 def get_documents(
-
-    user=Depends(get_current_user)
-
+    user=Depends(get_current_user),
 ):
-
-    user_id = str(
-        user.id
-    )
-
+    user_id = str(user.id)
 
     result = (
-
         supabase
-
         .table("documents")
-
         .select("*")
-
-        .eq(
-            "user_id",
-            user_id
-        )
-
-        .order(
-            "created_at",
-            desc=True
-        )
-
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
         .execute()
     )
 
-
-    return {
-
-        "documents":
-            result.data
-    }
+    return {"documents": result.data}
 
 
-# =====================================================
-# DELETE DOCUMENT
-# =====================================================
-
-@app.delete(
-    "/documents/{document_id}"
-)
+@app.delete("/documents/{document_id}")
 def remove_document(
-
     document_id: str,
-
-    user=Depends(get_current_user)
-
+    user=Depends(get_current_user),
 ):
-
-    user_id = str(
-        user.id
-    )
-
-
-    # -----------------------------------------
-    # Find document
-    # -----------------------------------------
+    user_id = str(user.id)
 
     result = (
-
         supabase
-
         .table("documents")
-
         .select("*")
-
-        .eq(
-            "id",
-            document_id
-        )
-
-        .eq(
-            "user_id",
-            user_id
-        )
-
+        .eq("id", document_id)
+        .eq("user_id", user_id)
         .execute()
     )
-
 
     documents = result.data
 
-
     if not documents:
-
         raise HTTPException(
-
             status_code=404,
-
-            detail="Document not found"
+            detail="Document not found",
         )
-
 
     document = documents[0]
 
-
-    # -----------------------------------------
-    # Delete vectors
-    # -----------------------------------------
-
     delete_document(
-
         user_id=user_id,
-
-        document_id=document_id
+        document_id=document_id,
     )
 
-
-    # -----------------------------------------
-    # Delete PDF
-    # -----------------------------------------
-
-    file_path = Path(
-        document["file_path"]
-    )
-
-
-    if file_path.exists():
-
-        file_path.unlink()
-
-
-    # -----------------------------------------
-    # Delete database record
-    # -----------------------------------------
+    storage_path = document.get("file_path")
+    if storage_path:
+        supabase.storage.from_("documents").remove([storage_path])
 
     (
-
         supabase
-
         .table("documents")
-
         .delete()
-
-        .eq(
-            "id",
-            document_id
-        )
-
-        .eq(
-            "user_id",
-            user_id
-        )
-
+        .eq("id", document_id)
+        .eq("user_id", user_id)
         .execute()
     )
 
+    return {"message": "Document deleted successfully"}
 
-    return {
-
-        "message":
-            "Document deleted successfully"
-    }
-
-
-# =====================================================
-# DASHBOARD
-# =====================================================
 
 @app.get("/dashboard")
 def dashboard(
-
-    user=Depends(get_current_user)
-
+    user=Depends(get_current_user),
 ):
-
-    user_id = str(
-        user.id
-    )
-
+    user_id = str(user.id)
 
     result = (
-
         supabase
-
         .table("documents")
-
         .select("*")
-
-        .eq(
-            "user_id",
-            user_id
-        )
-
+        .eq("user_id", user_id)
         .execute()
     )
 
-
     documents = result.data
 
-
-    total_documents = len(
-        documents
-    )
-
-
+    total_documents = len(documents)
     total_chunks = sum(
-
-        document.get(
-            "chunk_count",
-            0
-        )
-
+        document.get("chunk_count", 0) or 0
         for document in documents
     )
 
-
     return {
-
-        "total_documents":
-            total_documents,
-
-        "total_chunks":
-            total_chunks,
-
-        "documents":
-            documents
+        "total_documents": total_documents,
+        "total_chunks": total_chunks,
+        "documents": documents,
     }
