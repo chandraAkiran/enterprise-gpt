@@ -1,4 +1,8 @@
+import os
 import uuid
+import json
+
+from pathlib import Path
 
 from fastapi import (
     FastAPI,
@@ -8,36 +12,60 @@ from fastapi import (
     HTTPException,
 )
 
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
-from auth import (
-    get_current_user,
-    get_current_admin,
-    supabase,
+from fastapi.middleware.cors import (
+    CORSMiddleware,
 )
 
-from config import DOCUMENT_DIR
+from fastapi.responses import (
+    StreamingResponse,
+)
 
-from ingestion.pdf_loader import extract_pdf_pages
-from ingestion.chunker import create_chunks
+from pydantic import BaseModel
 
-from rag.embeddings import generate_embedding
+
+# =====================================================
+# PROJECT IMPORTS
+# =====================================================
+
+from auth import (
+    supabase,
+    get_current_user,
+    get_current_admin,
+)
+
+from ingestion.pdf_loader import (
+    extract_pdf_pages,
+)
+
+from ingestion.chunker import (
+    create_chunks,
+)
+
+from rag.embeddings import (
+    generate_embedding,
+)
 
 from rag.vector_store import (
     add_documents,
     delete_document,
 )
 
-from rag.rag_engine import ask_question
+from rag.rag_engine import (
+    ask_question,
+    stream_question,
+)
 
 
 # =====================================================
-# APP
+# FASTAPI APP
 # =====================================================
 
 app = FastAPI(
     title="Enterprise GPT API",
+    description=(
+        "Enterprise AI Knowledge Assistant "
+        "using Gemini, ChromaDB and Supabase"
+    ),
     version="1.0.0",
 )
 
@@ -59,6 +87,18 @@ app.add_middleware(
 
 
 # =====================================================
+# DOCUMENT DIRECTORY
+# =====================================================
+
+DOCUMENT_DIR = "documents"
+
+os.makedirs(
+    DOCUMENT_DIR,
+    exist_ok=True,
+)
+
+
+# =====================================================
 # REQUEST MODELS
 # =====================================================
 
@@ -67,19 +107,32 @@ class ChatRequest(BaseModel):
 
 
 # =====================================================
-# HOME
+# ROOT
 # =====================================================
 
 @app.get("/")
-def home():
+def root():
+
     return {
-        "message": "Enterprise GPT API is running",
-        "status": "success",
+        "message":
+            "Enterprise GPT API is running"
     }
 
 
 # =====================================================
-# UPLOAD PDF
+# HEALTH CHECK
+# =====================================================
+
+@app.get("/health")
+def health_check():
+
+    return {
+        "status": "healthy"
+    }
+
+
+# =====================================================
+# UPLOAD DOCUMENT
 # =====================================================
 
 @app.post("/upload")
@@ -87,49 +140,38 @@ async def upload_document(
     file: UploadFile = File(...),
     user=Depends(get_current_user),
 ):
+
+    user_id = str(
+        user.id
+    )
+
     # -------------------------------------------------
-    # Validate filename
+    # Validate file
     # -------------------------------------------------
 
     if not file.filename:
+
         raise HTTPException(
             status_code=400,
-            detail="Filename is missing",
+            detail="File name is missing",
         )
 
-    # -------------------------------------------------
-    # Validate PDF
-    # -------------------------------------------------
+    if not file.filename.lower().endswith(
+        ".pdf"
+    ):
 
-    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are supported",
         )
 
     # -------------------------------------------------
-    # User ID
+    # Create document ID
     # -------------------------------------------------
 
-    user_id = str(user.id)
-
-    # -------------------------------------------------
-    # Generate document ID
-    # -------------------------------------------------
-
-    document_id = str(uuid.uuid4())
-
-    # -------------------------------------------------
-    # Temporary local filename
-    # -------------------------------------------------
-
-    safe_filename = (
-        f"{user_id}_"
-        f"{document_id}_"
-        f"{file.filename}"
+    document_id = str(
+        uuid.uuid4()
     )
-
-    file_path = DOCUMENT_DIR / safe_filename
 
     # -------------------------------------------------
     # Read uploaded PDF
@@ -137,12 +179,12 @@ async def upload_document(
 
     contents = await file.read()
 
-    # -------------------------------------------------
-    # Save temporary local PDF
-    # -------------------------------------------------
+    if not contents:
 
-    with open(file_path, "wb") as output_file:
-        output_file.write(contents)
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded PDF is empty",
+        )
 
     # -------------------------------------------------
     # Supabase Storage path
@@ -153,151 +195,218 @@ async def upload_document(
         f"{document_id}_{file.filename}"
     )
 
-    storage_uploaded = False
-    database_record_created = False
+    # -------------------------------------------------
+    # Temporary local PDF path
+    # -------------------------------------------------
+
+    temp_file_path = os.path.join(
+        DOCUMENT_DIR,
+        f"{document_id}_{file.filename}",
+    )
 
     try:
-        # -------------------------------------------------
-        # Upload permanent PDF to Supabase Storage
-        # -------------------------------------------------
 
-        supabase.storage.from_("documents").upload(
+        # ---------------------------------------------
+        # Upload original PDF to Supabase Storage
+        # ---------------------------------------------
+
+        supabase.storage.from_(
+            "documents"
+        ).upload(
             path=storage_path,
             file=contents,
             file_options={
-                "content-type": "application/pdf"
+                "content-type":
+                    "application/pdf"
             },
         )
 
-        storage_uploaded = True
+        # ---------------------------------------------
+        # Save temporary local copy
+        # ---------------------------------------------
 
-        # -------------------------------------------------
-        # Create database record
-        # -------------------------------------------------
+        with open(
+            temp_file_path,
+            "wb",
+        ) as temp_file:
 
-        supabase.table("documents").insert({
-            "id": document_id,
-            "user_id": user_id,
-            "file_name": file.filename,
-            "file_path": storage_path,
-            "status": "processing",
-        }).execute()
+            temp_file.write(
+                contents
+            )
 
-        database_record_created = True
-
-        # -------------------------------------------------
+        # ---------------------------------------------
         # Extract PDF pages
-        # -------------------------------------------------
+        # ---------------------------------------------
 
-        pages = extract_pdf_pages(file_path)
+        pages = extract_pdf_pages(
+            Path(temp_file_path)
+        )
 
-        # -------------------------------------------------
+        for page in pages:
+            page["source"] = file.filename
+
+        if not pages:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No text could be extracted "
+                    "from the PDF"
+                ),
+            )
+
+        # ---------------------------------------------
         # Create chunks
-        # -------------------------------------------------
+        # ---------------------------------------------
 
-        chunks = create_chunks(pages)
+        chunks = create_chunks(
+            pages
+        )
 
-        # -------------------------------------------------
-        # Generate embeddings
-        # -------------------------------------------------
+        if not chunks:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No text chunks could be "
+                    "created from the PDF"
+                ),
+            )
+
+        # ---------------------------------------------
+        # Generate embedding for every chunk
+        # ---------------------------------------------
 
         embeddings = []
 
         for chunk in chunks:
+
             embedding = generate_embedding(
                 chunk["text"]
             )
 
-            embeddings.append(embedding)
+            embeddings.append(
+                embedding
+            )
 
-        # -------------------------------------------------
-        # Store vectors
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # Store chunks + vectors in ChromaDB
+        # ---------------------------------------------
 
-        chunk_count = add_documents(
+        stored_chunks = add_documents(
             chunks=chunks,
             embeddings=embeddings,
             user_id=user_id,
             document_id=document_id,
         )
 
-        # -------------------------------------------------
-        # Update database
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # Save document record in Supabase
+        # ---------------------------------------------
 
-        (
+        database_result = (
             supabase
             .table("documents")
-            .update({
-                "page_count": len(pages),
-                "chunk_count": chunk_count,
-                "status": "ready",
-            })
-            .eq("id", document_id)
-            .eq("user_id", user_id)
+            .insert(
+                {
+                    "id":
+                        document_id,
+
+                    "user_id":
+                        user_id,
+
+                    "file_name":
+                        file.filename,
+
+                    "file_path":
+                        storage_path,
+                }
+            )
             .execute()
         )
 
+        # ---------------------------------------------
+        # Success
+        # ---------------------------------------------
+
         return {
-            "message": "Document uploaded successfully",
-            "document_id": document_id,
-            "filename": file.filename,
-            "pages": len(pages),
-            "chunks": chunk_count,
+            "message":
+                "Document uploaded successfully",
+
+            "document_id":
+                document_id,
+
+            "file_name":
+                file.filename,
+
+            "chunks":
+                stored_chunks,
+
+            "document":
+                database_result.data,
         }
 
+    except HTTPException:
+
+        raise
+
     except Exception as error:
-        # -------------------------------------------------
-        # Mark database record as failed
-        # -------------------------------------------------
 
-        if database_record_created:
-            try:
-                (
-                    supabase
-                    .table("documents")
-                    .update({
-                        "status": "failed",
-                    })
-                    .eq("id", document_id)
-                    .eq("user_id", user_id)
-                    .execute()
-                )
+        print(
+            "Upload error:",
+            str(error),
+        )
 
-            except Exception:
-                pass
+        # ---------------------------------------------
+        # Clean up Storage if processing failed
+        # ---------------------------------------------
 
-        # -------------------------------------------------
-        # Remove orphaned Storage file
-        # -------------------------------------------------
+        try:
 
-        elif storage_uploaded:
-            try:
-                supabase.storage.from_(
-                    "documents"
-                ).remove([
-                    storage_path
-                ])
+            supabase.storage.from_(
+                "documents"
+            ).remove([
+                storage_path
+            ])
 
-            except Exception:
-                pass
+        except Exception as cleanup_error:
+
+            print(
+                "Storage cleanup error:",
+                str(cleanup_error),
+            )
 
         raise HTTPException(
             status_code=500,
-            detail=str(error),
+            detail="Failed to upload document",
         )
 
     finally:
-        # -------------------------------------------------
-        # Delete temporary local PDF
-        # -------------------------------------------------
 
-        if file_path.exists():
-            file_path.unlink()
+        # ---------------------------------------------
+        # Remove temporary local PDF
+        # ---------------------------------------------
+
+        if os.path.exists(
+            temp_file_path
+        ):
+
+            try:
+
+                os.remove(
+                    temp_file_path
+                )
+
+            except Exception as cleanup_error:
+
+                print(
+                    "Temporary file cleanup error:",
+                    str(cleanup_error),
+                )
 
 
 # =====================================================
-# CHAT
+# NORMAL CHAT
 # =====================================================
 
 @app.post("/chat")
@@ -305,20 +414,122 @@ def chat(
     request: ChatRequest,
     user=Depends(get_current_user),
 ):
-    user_id = str(user.id)
+
+    user_id = str(
+        user.id
+    )
 
     if not request.question.strip():
+
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty",
         )
 
-    result = ask_question(
-        question=request.question,
-        user_id=user_id,
+    try:
+
+        result = ask_question(
+            question=request.question,
+            user_id=user_id,
+        )
+
+        return result
+
+    except HTTPException:
+
+        raise
+
+    except Exception as error:
+
+        print(
+            "Chat error:",
+            str(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate answer",
+        )
+
+
+# =====================================================
+# STREAMING CHAT
+# =====================================================
+
+@app.post("/chat/stream")
+def chat_stream(
+    request: ChatRequest,
+    user=Depends(get_current_user),
+):
+
+    user_id = str(
+        user.id
     )
 
-    return result
+    if not request.question.strip():
+
+        raise HTTPException(
+            status_code=400,
+            detail="Question cannot be empty",
+        )
+
+    # -------------------------------------------------
+    # Convert RAG events to NDJSON
+    # -------------------------------------------------
+
+    def generate():
+
+        try:
+
+            response_stream = stream_question(
+                question=request.question,
+                user_id=user_id,
+            )
+
+            for event in response_stream:
+
+                json_event = json.dumps(
+                    event,
+                    ensure_ascii=False,
+                )
+
+                yield (
+                    json_event +
+                    "\n"
+                )
+
+        except Exception as error:
+
+            print(
+                "Streaming error:",
+                str(error),
+            )
+
+            error_event = {
+                "type": "error",
+                "message":
+                    "Failed to generate answer",
+            }
+
+            yield (
+                json.dumps(
+                    error_event
+                )
+                +
+                "\n"
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control":
+                "no-cache",
+
+            "X-Accel-Buffering":
+                "no",
+        },
+    )
 
 
 # =====================================================
@@ -329,26 +540,247 @@ def chat(
 def get_documents(
     user=Depends(get_current_user),
 ):
-    user_id = str(user.id)
 
-    result = (
-        supabase
-        .table("documents")
-        .select("*")
-        .eq(
-            "user_id",
-            user_id,
-        )
-        .order(
-            "created_at",
-            desc=True,
-        )
-        .execute()
+    user_id = str(
+        user.id
     )
 
-    return {
-        "documents": result.data or []
-    }
+    try:
+
+        result = (
+            supabase
+            .table("documents")
+            .select("*")
+            .eq(
+                "user_id",
+                user_id
+            )
+            .order(
+                "created_at",
+                desc=True
+            )
+            .execute()
+        )
+
+        return {
+            "documents":
+                result.data or []
+        }
+
+    except Exception as error:
+
+        print(
+            "Get documents error:",
+            str(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load documents",
+        )
+
+
+# =====================================================
+# DELETE USER DOCUMENT
+# =====================================================
+
+@app.delete("/documents/{document_id}")
+def delete_user_document(
+    document_id: str,
+    user=Depends(get_current_user),
+):
+
+    user_id = str(
+        user.id
+    )
+
+    try:
+
+        result = (
+            supabase
+            .table("documents")
+            .select("*")
+            .eq(
+                "id",
+                document_id
+            )
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        documents = (
+            result.data or []
+        )
+
+        if not documents:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found",
+            )
+
+        document = documents[0]
+
+        # ---------------------------------------------
+        # Delete vectors from ChromaDB
+        # ---------------------------------------------
+
+        delete_document(
+            user_id=user_id,
+            document_id=document_id,
+        )
+
+        # ---------------------------------------------
+        # Delete PDF from Supabase Storage
+        # ---------------------------------------------
+
+        storage_path = document.get(
+            "file_path"
+        )
+
+        if storage_path:
+
+            supabase.storage.from_(
+                "documents"
+            ).remove([
+                storage_path
+            ])
+
+        # ---------------------------------------------
+        # Delete database record
+        # ---------------------------------------------
+
+        (
+            supabase
+            .table("documents")
+            .delete()
+            .eq(
+                "id",
+                document_id
+            )
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        return {
+            "message":
+                "Document deleted successfully"
+        }
+
+    except HTTPException:
+
+        raise
+
+    except Exception as error:
+
+        print(
+            "Delete document error:",
+            str(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete document",
+        )
+
+
+# =====================================================
+# DASHBOARD
+# =====================================================
+
+@app.get("/dashboard")
+def dashboard(
+    user=Depends(get_current_user),
+):
+
+    user_id = str(
+        user.id
+    )
+
+    try:
+
+        # ---------------------------------------------
+        # User documents
+        # ---------------------------------------------
+
+        documents_result = (
+            supabase
+            .table("documents")
+            .select(
+                "id",
+                count="exact"
+            )
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        # ---------------------------------------------
+        # User chat sessions
+        # ---------------------------------------------
+
+        sessions_result = (
+            supabase
+            .table("chat_sessions")
+            .select(
+                "id",
+                count="exact"
+            )
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        # ---------------------------------------------
+        # User chat messages
+        # ---------------------------------------------
+
+        messages_result = (
+            supabase
+            .table("chat_messages")
+            .select(
+                "id",
+                count="exact"
+            )
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        return {
+            "documents":
+                documents_result.count or 0,
+
+            "chat_sessions":
+                sessions_result.count or 0,
+
+            "chat_messages":
+                messages_result.count or 0,
+        }
+
+    except Exception as error:
+
+        print(
+            "Dashboard error:",
+            str(error),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load dashboard",
+        )
 
 
 # =====================================================
@@ -356,38 +788,45 @@ def get_documents(
 # =====================================================
 
 @app.get("/admin/documents")
-def get_admin_documents(
-    admin=Depends(get_current_admin),
+def admin_get_documents(
+    admin=Depends(
+        get_current_admin
+    ),
 ):
+
     try:
+
         result = (
             supabase
             .table("documents")
             .select("*")
             .order(
                 "created_at",
-                desc=True,
+                desc=True
             )
             .execute()
         )
 
-        documents = result.data or []
-
         return {
-            "documents": documents,
-            "total": len(documents),
+            "documents":
+                result.data or []
         }
 
     except Exception as error:
+
         print(
-            "Admin documents error:",
+            "Admin get documents error:",
             str(error),
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to load admin documents",
+            detail=(
+                "Failed to load "
+                "admin documents"
+            ),
         )
+
 
 # =====================================================
 # ADMIN - DELETE ANY USER DOCUMENT
@@ -398,22 +837,30 @@ def admin_delete_document(
     document_id: str,
     admin=Depends(get_current_admin),
 ):
+
     try:
+
         # ---------------------------------------------
-        # 1. Find the document
+        # 1. Find document
         # ---------------------------------------------
 
         result = (
             supabase
             .table("documents")
             .select("*")
-            .eq("id", document_id)
+            .eq(
+                "id",
+                document_id
+            )
             .execute()
         )
 
-        documents = result.data or []
+        documents = (
+            result.data or []
+        )
 
         if not documents:
+
             raise HTTPException(
                 status_code=404,
                 detail="Document not found",
@@ -430,7 +877,7 @@ def admin_delete_document(
         )
 
         # ---------------------------------------------
-        # 3. Delete vectors from ChromaDB
+        # 3. Delete vectors
         # ---------------------------------------------
 
         delete_document(
@@ -439,7 +886,7 @@ def admin_delete_document(
         )
 
         # ---------------------------------------------
-        # 4. Delete PDF from Supabase Storage
+        # 4. Delete PDF from Storage
         # ---------------------------------------------
 
         storage_path = document.get(
@@ -447,6 +894,7 @@ def admin_delete_document(
         )
 
         if storage_path:
+
             supabase.storage.from_(
                 "documents"
             ).remove([
@@ -461,7 +909,10 @@ def admin_delete_document(
             supabase
             .table("documents")
             .delete()
-            .eq("id", document_id)
+            .eq(
+                "id",
+                document_id
+            )
             .execute()
         )
 
@@ -475,9 +926,11 @@ def admin_delete_document(
         }
 
     except HTTPException:
+
         raise
 
     except Exception as error:
+
         print(
             "Admin delete document error:",
             str(error),
@@ -487,129 +940,3 @@ def admin_delete_document(
             status_code=500,
             detail="Failed to delete document",
         )
-
-
-# =====================================================
-# DELETE USER DOCUMENT
-# =====================================================
-
-@app.delete("/documents/{document_id}")
-def remove_document(
-    document_id: str,
-    user=Depends(get_current_user),
-):
-    user_id = str(user.id)
-
-    # -------------------------------------------------
-    # Find document
-    # -------------------------------------------------
-
-    result = (
-        supabase
-        .table("documents")
-        .select("*")
-        .eq(
-            "id",
-            document_id,
-        )
-        .eq(
-            "user_id",
-            user_id,
-        )
-        .execute()
-    )
-
-    documents = result.data or []
-
-    if not documents:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
-
-    document = documents[0]
-
-    # -------------------------------------------------
-    # Delete vectors from ChromaDB
-    # -------------------------------------------------
-
-    delete_document(
-        user_id=user_id,
-        document_id=document_id,
-    )
-
-    # -------------------------------------------------
-    # Delete PDF from Supabase Storage
-    # -------------------------------------------------
-
-    storage_path = document.get("file_path")
-
-    if storage_path:
-        supabase.storage.from_(
-            "documents"
-        ).remove([
-            storage_path
-        ])
-
-    # -------------------------------------------------
-    # Delete database record
-    # -------------------------------------------------
-
-    (
-        supabase
-        .table("documents")
-        .delete()
-        .eq(
-            "id",
-            document_id,
-        )
-        .eq(
-            "user_id",
-            user_id,
-        )
-        .execute()
-    )
-
-    return {
-        "message": "Document deleted successfully"
-    }
-
-
-# =====================================================
-# DASHBOARD
-# =====================================================
-
-@app.get("/dashboard")
-def dashboard(
-    user=Depends(get_current_user),
-):
-    user_id = str(user.id)
-
-    result = (
-        supabase
-        .table("documents")
-        .select("*")
-        .eq(
-            "user_id",
-            user_id,
-        )
-        .execute()
-    )
-
-    documents = result.data or []
-
-    total_documents = len(documents)
-
-    total_chunks = sum(
-        document.get(
-            "chunk_count",
-            0,
-        ) or 0
-        for document in documents
-    )
-
-    return {
-        "total_documents": total_documents,
-        "total_chunks": total_chunks,
-        "documents": documents,
-    }

@@ -6,14 +6,33 @@ import {
 } from "react";
 
 import {
-    getDashboard
+    getDashboard,
+    getDocuments
 } from "@/lib/api";
+
+
+interface DashboardData {
+    documents: number;
+    chat_sessions: number;
+    chat_messages: number;
+}
+
+
+interface Document {
+    id: string;
+    file_name: string;
+    file_path?: string;
+    created_at?: string;
+}
 
 
 export default function DashboardPage() {
 
     const [data, setData] =
-        useState<any>(null);
+        useState<DashboardData | null>(null);
+
+    const [documents, setDocuments] =
+        useState<Document[]>([]);
 
     const [loading, setLoading] =
         useState(true);
@@ -28,15 +47,34 @@ export default function DashboardPage() {
 
             try {
 
-                const result =
+                setError("");
+
+                // Load dashboard counts
+                const dashboardResult =
                     await getDashboard();
 
-                setData(result);
+                setData(
+                    dashboardResult
+                );
 
-            } catch (err: any) {
+
+                // Load actual document list
+                const documentsResult =
+                    await getDocuments();
+
+                setDocuments(
+                    documentsResult?.documents || []
+                );
+
+            } catch (err: unknown) {
+
+                const message =
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to load dashboard";
 
                 setError(
-                    err.message
+                    message
                 );
 
             } finally {
@@ -102,11 +140,17 @@ export default function DashboardPage() {
             )}
 
 
+            {/* ============================= */}
+            {/* DASHBOARD CARDS */}
+            {/* ============================= */}
+
             <div className="
                 grid
                 md:grid-cols-3
                 gap-6
             ">
+
+                {/* Documents */}
 
                 <div className="
                     bg-white
@@ -126,11 +170,13 @@ export default function DashboardPage() {
                         font-bold
                         mt-2
                     ">
-                        {data?.total_documents || 0}
+                        {data?.documents ?? 0}
                     </p>
 
                 </div>
 
+
+                {/* Chat Sessions */}
 
                 <div className="
                     bg-white
@@ -142,7 +188,7 @@ export default function DashboardPage() {
                     <p className="
                         text-gray-500
                     ">
-                        Knowledge Chunks
+                        Chat Sessions
                     </p>
 
                     <p className="
@@ -150,11 +196,13 @@ export default function DashboardPage() {
                         font-bold
                         mt-2
                     ">
-                        {data?.total_chunks || 0}
+                        {data?.chat_sessions ?? 0}
                     </p>
 
                 </div>
 
+
+                {/* Chat Messages */}
 
                 <div className="
                     bg-white
@@ -166,21 +214,74 @@ export default function DashboardPage() {
                     <p className="
                         text-gray-500
                     ">
-                        AI Status
+                        Chat Messages
                     </p>
 
                     <p className="
-                        text-2xl
+                        text-4xl
                         font-bold
                         mt-2
                     ">
-                        Active
+                        {data?.chat_messages ?? 0}
                     </p>
 
                 </div>
 
             </div>
 
+
+            {/* ============================= */}
+            {/* AI STATUS */}
+            {/* ============================= */}
+
+            <div className="
+                bg-white
+                rounded-2xl
+                shadow-sm
+                mt-8
+                p-6
+            ">
+
+                <div className="
+                    flex
+                    items-center
+                    justify-between
+                ">
+
+                    <div>
+
+                        <h2 className="
+                            text-xl
+                            font-bold
+                        ">
+                            AI Knowledge Assistant
+                        </h2>
+
+                        <p className="
+                            text-gray-500
+                            mt-1
+                        ">
+                            Gemini RAG system
+                        </p>
+
+                    </div>
+
+
+                    <span className="
+                        text-green-600
+                        font-medium
+                    ">
+                        ● Active
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            {/* ============================= */}
+            {/* RECENT DOCUMENTS */}
+            {/* ============================= */}
 
             <div className="
                 bg-white
@@ -199,7 +300,7 @@ export default function DashboardPage() {
                 </h2>
 
 
-                {data?.documents?.length === 0 ? (
+                {documents.length === 0 ? (
 
                     <p className="
                         text-gray-500
@@ -213,17 +314,20 @@ export default function DashboardPage() {
                         space-y-3
                     ">
 
-                        {data?.documents?.map(
-                            (document: any) => (
+                        {documents.map(
+                            (document) => (
 
                                 <div
-                                    key={document.id}
+                                    key={
+                                        document.id
+                                    }
                                     className="
                                         border
                                         rounded-lg
                                         p-4
                                         flex
                                         justify-between
+                                        items-center
                                     "
                                 >
 
@@ -237,19 +341,26 @@ export default function DashboardPage() {
                                             }
                                         </p>
 
-                                        <p className="
-                                            text-sm
-                                            text-gray-500
-                                        ">
-                                            {
-                                                document.page_count
-                                            }
-                                            {" "}pages •{" "}
-                                            {
-                                                document.chunk_count
-                                            }
-                                            {" "}chunks
-                                        </p>
+
+                                        {document.created_at && (
+
+                                            <p className="
+                                                text-sm
+                                                text-gray-500
+                                                mt-1
+                                            ">
+
+                                                Uploaded{" "}
+
+                                                {
+                                                    new Date(
+                                                        document.created_at
+                                                    ).toLocaleString()
+                                                }
+
+                                            </p>
+
+                                        )}
 
                                     </div>
 
@@ -258,9 +369,7 @@ export default function DashboardPage() {
                                         text-sm
                                         text-green-600
                                     ">
-                                        {
-                                            document.status
-                                        }
+                                        Ready
                                     </span>
 
                                 </div>
