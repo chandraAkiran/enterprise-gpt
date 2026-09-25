@@ -55,6 +55,10 @@ from rag.rag_engine import (
     stream_question,
 )
 
+from rag.langchain_chain import (
+    stream_with_langchain,
+)
+
 
 # =====================================================
 # FASTAPI APP
@@ -453,7 +457,7 @@ def chat(
 
 
 # =====================================================
-# STREAMING CHAT
+# STREAMING CHAT - LANGCHAIN
 # =====================================================
 
 @app.post("/chat/stream")
@@ -466,6 +470,10 @@ def chat_stream(
         user.id
     )
 
+    # -------------------------------------------------
+    # Validate question
+    # -------------------------------------------------
+
     if not request.question.strip():
 
         raise HTTPException(
@@ -473,18 +481,30 @@ def chat_stream(
             detail="Question cannot be empty",
         )
 
+
     # -------------------------------------------------
-    # Convert RAG events to NDJSON
+    # Streaming generator
     # -------------------------------------------------
 
     def generate():
 
         try:
 
-            response_stream = stream_question(
-                question=request.question,
-                user_id=user_id,
+            # =========================================
+            # LANGCHAIN STREAM
+            # =========================================
+
+            response_stream = (
+                stream_with_langchain(
+                    question=request.question,
+                    user_id=user_id,
+                )
             )
+
+
+            # =========================================
+            # SEND NDJSON EVENTS
+            # =========================================
 
             for event in response_stream:
 
@@ -494,9 +514,9 @@ def chat_stream(
                 )
 
                 yield (
-                    json_event +
-                    "\n"
+                    json_event + "\n"
                 )
+
 
         except Exception as error:
 
@@ -505,23 +525,31 @@ def chat_stream(
                 str(error),
             )
 
+
             error_event = {
                 "type": "error",
                 "message":
                     "Failed to generate answer",
             }
 
+
             yield (
                 json.dumps(
                     error_event
                 )
-                +
-                "\n"
+                + "\n"
             )
+
+
+    # -------------------------------------------------
+    # Return streaming response
+    # -------------------------------------------------
 
     return StreamingResponse(
         generate(),
-        media_type="application/x-ndjson",
+        media_type=(
+            "application/x-ndjson"
+        ),
         headers={
             "Cache-Control":
                 "no-cache",
@@ -530,6 +558,7 @@ def chat_stream(
                 "no",
         },
     )
+
 
 
 # =====================================================
