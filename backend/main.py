@@ -2,8 +2,6 @@ import os
 import uuid
 import json
 
-from pathlib import Path
-
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -55,10 +53,6 @@ from rag.rag_engine import (
     stream_question,
 )
 
-from rag.langchain_chain import (
-    stream_with_langchain,
-)
-
 from rag.agent import (
     ask_agent,
     stream_agent,
@@ -73,7 +67,8 @@ app = FastAPI(
     title="Enterprise GPT API",
     description=(
         "Enterprise AI Knowledge Assistant "
-        "using Gemini, ChromaDB and Supabase"
+        "using RAG, LangChain Agents, "
+        "multiple LLMs, ChromaDB and Supabase"
     ),
     version="1.0.0",
 )
@@ -99,12 +94,10 @@ app.add_middleware(
 # DOCUMENT DIRECTORY
 # =====================================================
 
-DOCUMENT_DIR = "documents"
+from pathlib import Path
 
-os.makedirs(
-    DOCUMENT_DIR,
-    exist_ok=True,
-)
+DOCUMENT_DIR = Path("documents")
+DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =====================================================
@@ -113,6 +106,40 @@ os.makedirs(
 
 class ChatRequest(BaseModel):
     question: str
+    provider: str = "gemini"
+
+
+# =====================================================
+# SUPPORTED LLM PROVIDERS
+# =====================================================
+
+SUPPORTED_PROVIDERS = {
+    "gemini",
+    "openai",
+}
+
+
+def validate_provider(
+    provider: str,
+):
+
+    provider = (
+        provider
+        .lower()
+        .strip()
+    )
+
+    if provider not in SUPPORTED_PROVIDERS:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported AI provider. "
+                "Use 'gemini' or 'openai'."
+            ),
+        )
+
+    return provider
 
 
 # =====================================================
@@ -149,282 +176,109 @@ async def upload_document(
     file: UploadFile = File(...),
     user=Depends(get_current_user),
 ):
-
-    user_id = str(
-        user.id
-    )
-
-    # -------------------------------------------------
-    # Validate file
-    # -------------------------------------------------
-
     if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is missing")
 
-        raise HTTPException(
-            status_code=400,
-            detail="File name is missing",
-        )
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    if not file.filename.lower().endswith(
-        ".pdf"
-    ):
-
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are supported",
-        )
-
-    # -------------------------------------------------
-    # Create document ID
-    # -------------------------------------------------
-
-    document_id = str(
-        uuid.uuid4()
-    )
-
-    # -------------------------------------------------
-    # Read uploaded PDF
-    # -------------------------------------------------
-
+    user_id = str(user.id)
+    document_id = str(uuid.uuid4())
     contents = await file.read()
 
     if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
 
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded PDF is empty",
-        )
+    storage_path = f"{user_id}/{document_id}_{file.filename}"
+    safe_filename = f"{user_id}_{document_id}_{file.filename}"
+    file_path = DOCUMENT_DIR / safe_filename
 
-    # -------------------------------------------------
-    # Supabase Storage path
-    # -------------------------------------------------
-
-    storage_path = (
-        f"{user_id}/"
-        f"{document_id}_{file.filename}"
-    )
-
-    # -------------------------------------------------
-    # Temporary local PDF path
-    # -------------------------------------------------
-
-    temp_file_path = os.path.join(
-        DOCUMENT_DIR,
-        f"{document_id}_{file.filename}",
-    )
+    storage_uploaded = False
+    db_created = False
 
     try:
+        with open(file_path, "wb") as output_file:
+            output_file.write(contents)
 
-        # ---------------------------------------------
-        # Upload original PDF to Supabase Storage
-        # ---------------------------------------------
-
-        supabase.storage.from_(
-            "documents"
-        ).upload(
+        supabase.storage.from_("documents").upload(
             path=storage_path,
             file=contents,
-            file_options={
-                "content-type":
-                    "application/pdf"
-            },
+            file_options={"content-type": "application/pdf"},
         )
+        storage_uploaded = True
 
-        # ---------------------------------------------
-        # Save temporary local copy
-        # ---------------------------------------------
+        supabase.table("documents").insert({
+            "id": document_id,
+            "user_id": user_id,
+            "file_name": file.filename,
+            "file_path": storage_path,
+            "status": "processing",
+        }).execute()
+        db_created = True
 
-        with open(
-            temp_file_path,
-            "wb",
-        ) as temp_file:
-
-            temp_file.write(
-                contents
-            )
-
-        # ---------------------------------------------
-        # Extract PDF pages
-        # ---------------------------------------------
-
-        pages = extract_pdf_pages(
-            Path(temp_file_path)
-        )
-
-        for page in pages:
-            page["source"] = file.filename
-
-        if not pages:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No text could be extracted "
-                    "from the PDF"
-                ),
-            )
-
-        # ---------------------------------------------
-        # Create chunks
-        # ---------------------------------------------
-
-        chunks = create_chunks(
-            pages
-        )
+        pages = extract_pdf_pages(file_path)
+        chunks = create_chunks(pages)
 
         if not chunks:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No text chunks could be "
-                    "created from the PDF"
-                ),
-            )
-
-        # ---------------------------------------------
-        # Generate embedding for every chunk
-        # ---------------------------------------------
+            raise ValueError("No text could be extracted from the PDF")
 
         embeddings = []
-
         for chunk in chunks:
+            embeddings.append(generate_embedding(chunk["text"]))
 
-            embedding = generate_embedding(
-                chunk["text"]
-            )
-
-            embeddings.append(
-                embedding
-            )
-
-        # ---------------------------------------------
-        # Store chunks + vectors in ChromaDB
-        # ---------------------------------------------
-
-        stored_chunks = add_documents(
+        chunk_count = add_documents(
             chunks=chunks,
             embeddings=embeddings,
             user_id=user_id,
             document_id=document_id,
         )
 
-        # ---------------------------------------------
-        # Save document record in Supabase
-        # ---------------------------------------------
-
-        database_result = (
-    supabase
-    .table("documents")
-    .insert(
-        {
-            "id":
-                document_id,
-
-            "user_id":
-                user_id,
-
-            "file_name":
-                file.filename,
-
-            "file_path":
-                storage_path,
-
-            "page_count":
-                len(pages),
-
-            "chunk_count":
-                stored_chunks,
-
-            "status":
-                "ready",
-        }
-    )
-    .execute()
-)
-
-        # ---------------------------------------------
-        # Success
-        # ---------------------------------------------
+        supabase.table("documents").update({
+            "page_count": len(pages),
+            "chunk_count": chunk_count,
+            "status": "ready",
+        }).eq("id", document_id).eq("user_id", user_id).execute()
 
         return {
-            "message":
-                "Document uploaded successfully",
-
-            "document_id":
-                document_id,
-
-            "file_name":
-                file.filename,
-
-            "chunks":
-                stored_chunks,
-
-            "document":
-                database_result.data,
+            "message": "Document uploaded successfully",
+            "document_id": document_id,
+            "file_name": file.filename,
+            "pages": len(pages),
+            "chunks": chunk_count,
         }
 
     except HTTPException:
-
         raise
 
     except Exception as error:
+        print("Upload error:", str(error))
 
-        print(
-            "Upload error:",
-            str(error),
-        )
+        if db_created:
+            try:
+                supabase.table("documents").update({
+                    "status": "failed"
+                }).eq("id", document_id).eq("user_id", user_id).execute()
+            except Exception as db_error:
+                print("Database cleanup error:", str(db_error))
 
-        # ---------------------------------------------
-        # Clean up Storage if processing failed
-        # ---------------------------------------------
+        if storage_uploaded:
+            try:
+                supabase.storage.from_("documents").remove([storage_path])
+            except Exception as storage_error:
+                print("Storage cleanup error:", str(storage_error))
 
-        try:
-
-            supabase.storage.from_(
-                "documents"
-            ).remove([
-                storage_path
-            ])
-
-        except Exception as cleanup_error:
-
-            print(
-                "Storage cleanup error:",
-                str(cleanup_error),
-            )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to upload document",
-        )
+        raise HTTPException(status_code=500, detail=str(error))
 
     finally:
-
-        # ---------------------------------------------
-        # Remove temporary local PDF
-        # ---------------------------------------------
-
-        if os.path.exists(
-            temp_file_path
-        ):
-
+        if file_path.exists():
             try:
-
-                os.remove(
-                    temp_file_path
-                )
-
+                file_path.unlink()
             except Exception as cleanup_error:
-
-                print(
-                    "Temporary file cleanup error:",
-                    str(cleanup_error),
-                )
+                print("Temporary file cleanup error:", str(cleanup_error))
 
 
 # =====================================================
-# NORMAL CHAT
+# NORMAL RAG CHAT
 # =====================================================
 
 @app.post("/chat")
@@ -437,6 +291,11 @@ def chat(
         user.id
     )
 
+
+    # -------------------------------------------------
+    # Validate question
+    # -------------------------------------------------
+
     if not request.question.strip():
 
         raise HTTPException(
@@ -444,18 +303,26 @@ def chat(
             detail="Question cannot be empty",
         )
 
+
     try:
+
+        # ---------------------------------------------
+        # Ask RAG engine
+        # ---------------------------------------------
 
         result = ask_question(
             question=request.question,
             user_id=user_id,
         )
 
+
         return result
+
 
     except HTTPException:
 
         raise
+
 
     except Exception as error:
 
@@ -464,6 +331,7 @@ def chat(
             str(error),
         )
 
+
         raise HTTPException(
             status_code=500,
             detail="Failed to generate answer",
@@ -471,7 +339,7 @@ def chat(
 
 
 # =====================================================
-# STREAMING CHAT - LANGCHAIN
+# STREAMING RAG CHAT
 # =====================================================
 
 @app.post("/chat/stream")
@@ -483,6 +351,7 @@ def chat_stream(
     user_id = str(
         user.id
     )
+
 
     # -------------------------------------------------
     # Validate question
@@ -497,28 +366,18 @@ def chat_stream(
 
 
     # -------------------------------------------------
-    # Streaming generator
+    # Convert RAG events to NDJSON
     # -------------------------------------------------
 
     def generate():
 
         try:
 
-            # =========================================
-            # LANGCHAIN STREAM
-            # =========================================
-
-            response_stream = (
-                stream_with_langchain(
-                    question=request.question,
-                    user_id=user_id,
-                )
+            response_stream = stream_question(
+                question=request.question,
+                user_id=user_id,
             )
 
-
-            # =========================================
-            # SEND NDJSON EVENTS
-            # =========================================
 
             for event in response_stream:
 
@@ -528,7 +387,8 @@ def chat_stream(
                 )
 
                 yield (
-                    json_event + "\n"
+                    json_event +
+                    "\n"
                 )
 
 
@@ -549,21 +409,17 @@ def chat_stream(
 
             yield (
                 json.dumps(
-                    error_event
+                    error_event,
+                    ensure_ascii=False,
                 )
-                + "\n"
+                +
+                "\n"
             )
 
 
-    # -------------------------------------------------
-    # Return streaming response
-    # -------------------------------------------------
-
     return StreamingResponse(
         generate(),
-        media_type=(
-            "application/x-ndjson"
-        ),
+        media_type="application/x-ndjson",
         headers={
             "Cache-Control":
                 "no-cache",
@@ -572,6 +428,7 @@ def chat_stream(
                 "no",
         },
     )
+
 
 # =====================================================
 # AGENT CHAT
@@ -587,6 +444,11 @@ def agent_chat(
         user.id
     )
 
+
+    # -------------------------------------------------
+    # Validate question
+    # -------------------------------------------------
+
     if not request.question.strip():
 
         raise HTTPException(
@@ -594,14 +456,36 @@ def agent_chat(
             detail="Question cannot be empty",
         )
 
+
+    # -------------------------------------------------
+    # Validate LLM provider
+    # -------------------------------------------------
+
+    provider = validate_provider(
+        request.provider
+    )
+
+
     try:
+
+        # ---------------------------------------------
+        # Ask Agent
+        # ---------------------------------------------
 
         result = ask_agent(
             question=request.question,
             user_id=user_id,
+            provider=provider,
         )
 
+
         return result
+
+
+    except HTTPException:
+
+        raise
+
 
     except Exception as error:
 
@@ -610,9 +494,15 @@ def agent_chat(
             str(error),
         )
 
+
         error_message = str(
             error
         )
+
+
+        # ---------------------------------------------
+        # API quota / credit error
+        # ---------------------------------------------
 
         if (
             "429" in error_message
@@ -621,30 +511,50 @@ def agent_chat(
             in error_message
             or
             "quota" in error_message.lower()
+            or
+            "insufficient_quota"
+            in error_message.lower()
+            or
+            "credit_balance_exhausted"
+            in error_message.lower()
         ):
 
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    "Gemini API quota has "
-                    "been reached."
+                    "The selected AI provider "
+                    "has reached its API quota "
+                    "or credit limit."
                 ),
             )
+
+
+        # ---------------------------------------------
+        # Temporary provider error
+        # ---------------------------------------------
 
         if (
             "503" in error_message
             or
             "UNAVAILABLE"
             in error_message
+            or
+            "high demand"
+            in error_message.lower()
         ):
 
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "Gemini is temporarily "
-                    "unavailable."
+                    "The selected AI provider "
+                    "is temporarily unavailable."
                 ),
             )
+
+
+        # ---------------------------------------------
+        # Other error
+        # ---------------------------------------------
 
         raise HTTPException(
             status_code=500,
@@ -653,6 +563,7 @@ def agent_chat(
                 "agent response"
             ),
         )
+
 
 # =====================================================
 # AGENT STREAMING CHAT
@@ -668,11 +579,31 @@ def agent_chat_stream(
         user.id
     )
 
+
+    # -------------------------------------------------
+    # Validate question
+    # -------------------------------------------------
+
     if not request.question.strip():
+
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty",
         )
+
+
+    # -------------------------------------------------
+    # Validate LLM provider
+    # -------------------------------------------------
+
+    provider = validate_provider(
+        request.provider
+    )
+
+
+    # -------------------------------------------------
+    # Generate NDJSON stream
+    # -------------------------------------------------
 
     def generate():
 
@@ -681,7 +612,9 @@ def agent_chat_stream(
             response_stream = stream_agent(
                 question=request.question,
                 user_id=user_id,
+                provider=provider,
             )
+
 
             for event in response_stream:
 
@@ -690,7 +623,11 @@ def agent_chat_stream(
                     ensure_ascii=False,
                 )
 
-                yield json_event + "\n"
+                yield (
+                    json_event +
+                    "\n"
+                )
+
 
         except Exception as error:
 
@@ -699,6 +636,7 @@ def agent_chat_stream(
                 str(error),
             )
 
+
             error_event = {
                 "type": "error",
                 "message":
@@ -706,22 +644,28 @@ def agent_chat_stream(
                     "Agent response",
             }
 
+
             yield (
-                json.dumps(error_event)
-                + "\n"
+                json.dumps(
+                    error_event,
+                    ensure_ascii=False,
+                )
+                +
+                "\n"
             )
+
 
     return StreamingResponse(
         generate(),
         media_type="application/x-ndjson",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
+            "Cache-Control":
+                "no-cache",
+
+            "X-Accel-Buffering":
+                "no",
         },
     )
-
-
-
 
 
 # =====================================================
@@ -736,6 +680,7 @@ def get_documents(
     user_id = str(
         user.id
     )
+
 
     try:
 
@@ -754,10 +699,12 @@ def get_documents(
             .execute()
         )
 
+
         return {
             "documents":
                 result.data or []
         }
+
 
     except Exception as error:
 
@@ -765,6 +712,7 @@ def get_documents(
             "Get documents error:",
             str(error),
         )
+
 
         raise HTTPException(
             status_code=500,
@@ -786,7 +734,12 @@ def delete_user_document(
         user.id
     )
 
+
     try:
+
+        # ---------------------------------------------
+        # Find document belonging to current user
+        # ---------------------------------------------
 
         result = (
             supabase
@@ -803,9 +756,11 @@ def delete_user_document(
             .execute()
         )
 
+
         documents = (
             result.data or []
         )
+
 
         if not documents:
 
@@ -814,16 +769,19 @@ def delete_user_document(
                 detail="Document not found",
             )
 
+
         document = documents[0]
 
+
         # ---------------------------------------------
-        # Delete vectors from ChromaDB
+        # Delete vectors
         # ---------------------------------------------
 
         delete_document(
             user_id=user_id,
             document_id=document_id,
         )
+
 
         # ---------------------------------------------
         # Delete PDF from Supabase Storage
@@ -833,6 +791,7 @@ def delete_user_document(
             "file_path"
         )
 
+
         if storage_path:
 
             supabase.storage.from_(
@@ -840,6 +799,7 @@ def delete_user_document(
             ).remove([
                 storage_path
             ])
+
 
         # ---------------------------------------------
         # Delete database record
@@ -860,14 +820,17 @@ def delete_user_document(
             .execute()
         )
 
+
         return {
             "message":
                 "Document deleted successfully"
         }
 
+
     except HTTPException:
 
         raise
+
 
     except Exception as error:
 
@@ -875,6 +838,7 @@ def delete_user_document(
             "Delete document error:",
             str(error),
         )
+
 
         raise HTTPException(
             status_code=500,
@@ -894,6 +858,7 @@ def dashboard(
     user_id = str(
         user.id
     )
+
 
     try:
 
@@ -915,6 +880,7 @@ def dashboard(
             .execute()
         )
 
+
         # ---------------------------------------------
         # User chat sessions
         # ---------------------------------------------
@@ -932,6 +898,7 @@ def dashboard(
             )
             .execute()
         )
+
 
         # ---------------------------------------------
         # User chat messages
@@ -951,6 +918,7 @@ def dashboard(
             .execute()
         )
 
+
         return {
             "documents":
                 documents_result.count or 0,
@@ -962,12 +930,14 @@ def dashboard(
                 messages_result.count or 0,
         }
 
+
     except Exception as error:
 
         print(
             "Dashboard error:",
             str(error),
         )
+
 
         raise HTTPException(
             status_code=500,
@@ -999,10 +969,12 @@ def admin_get_documents(
             .execute()
         )
 
+
         return {
             "documents":
                 result.data or []
         }
+
 
     except Exception as error:
 
@@ -1010,6 +982,7 @@ def admin_get_documents(
             "Admin get documents error:",
             str(error),
         )
+
 
         raise HTTPException(
             status_code=500,
@@ -1027,13 +1000,15 @@ def admin_get_documents(
 @app.delete("/admin/documents/{document_id}")
 def admin_delete_document(
     document_id: str,
-    admin=Depends(get_current_admin),
+    admin=Depends(
+        get_current_admin
+    ),
 ):
 
     try:
 
         # ---------------------------------------------
-        # 1. Find document
+        # Find document
         # ---------------------------------------------
 
         result = (
@@ -1047,9 +1022,11 @@ def admin_delete_document(
             .execute()
         )
 
+
         documents = (
             result.data or []
         )
+
 
         if not documents:
 
@@ -1058,18 +1035,21 @@ def admin_delete_document(
                 detail="Document not found",
             )
 
+
         document = documents[0]
 
+
         # ---------------------------------------------
-        # 2. Get document owner
+        # Get document owner
         # ---------------------------------------------
 
         document_owner_id = str(
             document["user_id"]
         )
 
+
         # ---------------------------------------------
-        # 3. Delete vectors
+        # Delete vectors from ChromaDB
         # ---------------------------------------------
 
         delete_document(
@@ -1077,13 +1057,15 @@ def admin_delete_document(
             document_id=document_id,
         )
 
+
         # ---------------------------------------------
-        # 4. Delete PDF from Storage
+        # Delete PDF from Supabase Storage
         # ---------------------------------------------
 
         storage_path = document.get(
             "file_path"
         )
+
 
         if storage_path:
 
@@ -1093,8 +1075,9 @@ def admin_delete_document(
                 storage_path
             ])
 
+
         # ---------------------------------------------
-        # 5. Delete database record
+        # Delete database record
         # ---------------------------------------------
 
         (
@@ -1108,8 +1091,9 @@ def admin_delete_document(
             .execute()
         )
 
+
         # ---------------------------------------------
-        # 6. Success
+        # Success
         # ---------------------------------------------
 
         return {
@@ -1117,9 +1101,11 @@ def admin_delete_document(
                 "Document deleted successfully by admin"
         }
 
+
     except HTTPException:
 
         raise
+
 
     except Exception as error:
 
@@ -1128,7 +1114,9 @@ def admin_delete_document(
             str(error),
         )
 
+
         raise HTTPException(
             status_code=500,
             detail="Failed to delete document",
         )
+    

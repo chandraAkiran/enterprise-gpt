@@ -11,6 +11,8 @@ export interface Source {
     page: number;
 }
 
+export type LLMProvider = "gemini" | "openai";
+
 
 // =====================================================
 // AUTH HEADERS
@@ -316,7 +318,8 @@ export async function adminDeleteDocument(
 // =====================================================
 
 export async function agentChat(
-    question: string
+    question: string,
+    provider: LLMProvider = "gemini"
 ) {
 
     const authHeaders =
@@ -335,7 +338,8 @@ export async function agentChat(
             },
 
             body: JSON.stringify({
-                question
+                question,
+                provider
             }),
         }
     );
@@ -389,6 +393,8 @@ export async function agentChat(
 export async function streamAgentChat(
     question: string,
 
+    provider: LLMProvider,
+
     onChunk: (
         chunk: string
     ) => void,
@@ -414,7 +420,8 @@ export async function streamAgentChat(
             },
 
             body: JSON.stringify({
-                question
+                question,
+                provider
             }),
         }
     );

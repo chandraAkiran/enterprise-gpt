@@ -1,17 +1,13 @@
-from langchain.agents import (
-    create_agent,
-)
+from langchain.agents import create_agent
 
-from rag.langchain_llm import (
-    llm,
-)
+from llm.provider import get_llm
 
 from rag.agent_tools import (
-    create_document_search_tool,
+    create_document_search_tool
 )
 
 from rag.langchain_chain import (
-    retrieve_context,
+    retrieve_context
 )
 
 
@@ -22,21 +18,23 @@ from rag.langchain_chain import (
 AGENT_SYSTEM_PROMPT = """
 You are an Enterprise AI Knowledge Assistant.
 
-You have access to a tool that searches the
-authenticated user's uploaded enterprise documents.
+Your job is to help users answer questions using
+their enterprise documents.
 
-When the user asks about company policies,
-reports, manuals, procedures, guidelines,
-or other information that may exist in their
-uploaded documents, use the document search tool.
+When a question is related to company policies,
+reports, manuals, procedures, guidelines, or other
+uploaded enterprise documents, use the
+search_enterprise_documents tool.
 
-Use information returned by the tool when
-answering document-related questions.
+Use information returned by the tool to answer
+the user's question.
 
 Do not invent company information.
 
-If the information cannot be found in the
-uploaded documents, clearly say so.
+If the required information cannot be found in
+the uploaded documents, clearly tell the user.
+
+Give clear, professional, and concise answers.
 """
 
 
@@ -46,65 +44,90 @@ uploaded documents, clearly say so.
 
 def create_user_agent(
     user_id: str,
+    provider: str = "gemini",
 ):
 
-    # Create a document search tool that is locked
-    # to the authenticated user's ID.
-    document_tool = (
+    # ---------------------------------------------
+    # Create secure user-specific document tool
+    # ---------------------------------------------
+
+    document_search_tool = (
         create_document_search_tool(
-            user_id=user_id,
+            user_id=user_id
         )
     )
 
-    # Create LangChain Agent.
-    agent = create_agent(
-        model=llm,
-        tools=[
-            document_tool,
-        ],
-        system_prompt=(
-            AGENT_SYSTEM_PROMPT
-        ),
+    # ---------------------------------------------
+    # Select LLM provider
+    # ---------------------------------------------
+
+    selected_llm = get_llm(
+        provider
     )
 
-    return agent
+    # ---------------------------------------------
+    # Create LangChain Agent
+    # ---------------------------------------------
+
+    user_agent = create_agent(
+        model=selected_llm,
+        tools=[
+            document_search_tool
+        ],
+        system_prompt=AGENT_SYSTEM_PROMPT,
+    )
+
+    return user_agent
 
 
 # =====================================================
-# EXTRACT TEXT FROM AGENT RESPONSE
+# EXTRACT TEXT FROM AGENT MESSAGE
 # =====================================================
 
 def extract_answer_text(
-    content,
-) -> str:
-    """
-    Convert LangChain/Gemini structured message
-    content into a plain string.
-    """
+    content
+):
 
+    # ---------------------------------------------
     # Normal string response
-    if isinstance(content, str):
+    # ---------------------------------------------
+
+    if isinstance(
+        content,
+        str
+    ):
+
         return content
 
-    # Gemini/LangChain may return a list
-    # containing structured content blocks.
-    if isinstance(content, list):
+
+    # ---------------------------------------------
+    # Structured LangChain / Gemini / OpenAI response
+    # ---------------------------------------------
+
+    if isinstance(
+        content,
+        list
+    ):
 
         text_parts = []
 
-        for part in content:
+        for item in content:
 
-            # Plain string inside list
-            if isinstance(part, str):
+            if isinstance(
+                item,
+                str
+            ):
 
                 text_parts.append(
-                    part
+                    item
                 )
 
-            # Dictionary content block
-            elif isinstance(part, dict):
+            elif isinstance(
+                item,
+                dict
+            ):
 
-                text = part.get(
+                text = item.get(
                     "text"
                 )
 
@@ -114,13 +137,12 @@ def extract_answer_text(
                         str(text)
                     )
 
-            # Object content block
             else:
 
                 text = getattr(
-                    part,
+                    item,
                     "text",
-                    None,
+                    None
                 )
 
                 if text:
@@ -133,49 +155,71 @@ def extract_answer_text(
             text_parts
         )
 
+
+    # ---------------------------------------------
     # Dictionary response
-    if isinstance(content, dict):
+    # ---------------------------------------------
+
+    if isinstance(
+        content,
+        dict
+    ):
 
         text = content.get(
             "text"
         )
 
         if text:
-            return str(text)
 
-        return str(content)
+            return str(
+                text
+            )
 
-    # Object response such as:
-    # {type, text, extras}
+
+    # ---------------------------------------------
+    # Object containing text attribute
+    # ---------------------------------------------
+
     text = getattr(
         content,
         "text",
-        None,
+        None
     )
 
     if text:
-        return str(text)
 
-    # Final fallback
-    return str(content)
+        return str(
+            text
+        )
+
+
+    return ""
 
 
 # =====================================================
-# EXECUTE AGENT
+# ASK AGENT
 # =====================================================
 
 def ask_agent(
     question: str,
     user_id: str,
+    provider: str = "gemini",
 ):
 
-    # Create an Agent specifically for
-    # the authenticated user.
+    # ---------------------------------------------
+    # Create authenticated user's agent
+    # using selected LLM provider
+    # ---------------------------------------------
+
     user_agent = create_user_agent(
         user_id=user_id,
+        provider=provider,
     )
 
-    # Send the user's question to the Agent.
+    # ---------------------------------------------
+    # Run Agent
+    # ---------------------------------------------
+
     result = user_agent.invoke(
         {
             "messages": [
@@ -187,8 +231,10 @@ def ask_agent(
         }
     )
 
-    # Get all messages generated during
-    # Agent execution.
+    # ---------------------------------------------
+    # Extract final Agent answer
+    # ---------------------------------------------
+
     messages = result.get(
         "messages",
         []
@@ -198,30 +244,15 @@ def ask_agent(
 
         return {
             "answer":
-                "I could not generate an answer."
+                "The Agent did not return "
+                "a response."
         }
 
-    # Final message contains the
-    # Agent's final response.
     final_message = messages[-1]
 
-    content = getattr(
-        final_message,
-        "content",
-        "",
-    )
-
-    # Convert structured Gemini/LangChain
-    # content into plain text.
     answer = extract_answer_text(
-        content
+        final_message.content
     )
-
-    if not answer.strip():
-
-        answer = (
-            "I could not generate an answer."
-        )
 
     return {
         "answer": answer
@@ -235,30 +266,42 @@ def ask_agent(
 def stream_agent(
     question: str,
     user_id: str,
+    provider: str = "gemini",
 ):
-
-    # Create an Agent locked to the
-    # authenticated user.
-    user_agent = create_user_agent(
-        user_id=user_id,
-    )
-
-    # Retrieve metadata separately so the
-    # frontend can display clean sources.
-    retrieval = retrieve_context(
-        question=question,
-        user_id=user_id,
-    )
-
-    sources = retrieval.get(
-        "sources",
-        [],
-    )
 
     try:
 
-        # Stream Agent execution.
-        for event in user_agent.stream(
+        # ---------------------------------------------
+        # Create authenticated user's agent
+        # using selected LLM provider
+        # ---------------------------------------------
+
+        user_agent = create_user_agent(
+            user_id=user_id,
+            provider=provider,
+        )
+
+
+        # ---------------------------------------------
+        # Retrieve source metadata
+        # ---------------------------------------------
+
+        retrieval = retrieve_context(
+            question=question,
+            user_id=user_id,
+        )
+
+        sources = retrieval.get(
+            "sources",
+            [],
+        )
+
+
+        # ---------------------------------------------
+        # Stream Agent response
+        # ---------------------------------------------
+
+        response_stream = user_agent.stream(
             {
                 "messages": [
                     {
@@ -268,13 +311,20 @@ def stream_agent(
                 ]
             },
             stream_mode="messages",
-        ):
+        )
 
+
+        for event in response_stream:
+
+            # -----------------------------------------
             # LangChain may return:
-            # (message_chunk, metadata)
-            if (
-                isinstance(event, tuple)
-                and len(event) >= 1
+            #
+            # (message, metadata)
+            # -----------------------------------------
+
+            if isinstance(
+                event,
+                tuple
             ):
 
                 message = event[0]
@@ -283,18 +333,21 @@ def stream_agent(
 
                 message = event
 
+
             # -----------------------------------------
-            # Do not expose raw tool output
+            # Skip tool output
             # -----------------------------------------
 
             message_type = getattr(
                 message,
                 "type",
-                "",
+                None
             )
 
             if message_type == "tool":
+
                 continue
+
 
             # -----------------------------------------
             # Extract streamed text
@@ -303,31 +356,38 @@ def stream_agent(
             content = getattr(
                 message,
                 "content",
-                "",
+                None
             )
 
             if not content:
+
                 continue
+
 
             text = extract_answer_text(
                 content
             )
 
-            if text:
+            if not text:
 
-                yield {
-                    "type": "chunk",
-                    "content": text,
-                }
+                continue
+
+
+            yield {
+                "type": "chunk",
+                "content": text,
+            }
+
 
         # ---------------------------------------------
-        # Send structured sources after answer
+        # Send sources after answer
         # ---------------------------------------------
 
         yield {
             "type": "sources",
             "sources": sources,
         }
+
 
     except Exception as error:
 
@@ -337,11 +397,13 @@ def stream_agent(
 
         print(
             "Agent streaming error:",
-            error_message,
+            error_message
         )
 
+
         # ---------------------------------------------
-        # Gemini quota error
+        # API quota / credit error
+        # Gemini or OpenAI
         # ---------------------------------------------
 
         if (
@@ -350,22 +412,28 @@ def stream_agent(
             "RESOURCE_EXHAUSTED"
             in error_message
             or
-            "quota"
+            "quota" in error_message.lower()
+            or
+            "insufficient_quota"
+            in error_message.lower()
+            or
+            "credit_balance_exhausted"
             in error_message.lower()
         ):
 
             yield {
                 "type": "error",
                 "message":
-                    "Gemini API quota has "
-                    "been reached. "
-                    "Please try again later.",
+                    "The selected AI provider "
+                    "has reached its API quota "
+                    "or credit limit.",
             }
 
             return
 
+
         # ---------------------------------------------
-        # Gemini temporary unavailable error
+        # Temporary provider error
         # ---------------------------------------------
 
         if (
@@ -381,19 +449,22 @@ def stream_agent(
             yield {
                 "type": "error",
                 "message":
-                    "Gemini is temporarily busy. "
-                    "Please try again in a few moments.",
+                    "The selected AI provider "
+                    "is temporarily unavailable. "
+                    "Please try again shortly.",
             }
 
             return
 
+
         # ---------------------------------------------
-        # Generic error
+        # Other error
         # ---------------------------------------------
 
         yield {
             "type": "error",
             "message":
-                "The Agent encountered an "
-                "unexpected error.",
+                "The AI Agent encountered "
+                "an unexpected error. "
+                "Please try again.",
         }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { streamAgentChat, Source } from "@/lib/api";
+import { streamAgentChat, Source, LLMProvider } from "@/lib/api";
 import { createChatSession, saveChatMessage, getChatSessions, getChatMessages } from "@/lib/chat";
 
 interface Message { role: "user" | "assistant"; content: string; sources?: Source[]; }
@@ -14,6 +14,7 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [provider, setProvider] = useState<LLMProvider>("gemini");
 
   async function loadSessions() {
     try { setSessions((await getChatSessions()) ?? []); }
@@ -165,7 +166,7 @@ await saveChatMessage(
         </div>
       </aside>
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="p-8 border-b bg-white"><h1 className="text-3xl font-bold">AI Knowledge Assistant</h1><p className="text-gray-500 mt-1">Ask questions about your uploaded documents</p></div>
+        <div className="p-8 border-b bg-white flex items-center justify-between gap-4"><div><h1 className="text-3xl font-bold">AI Knowledge Assistant</h1><p className="text-gray-500 mt-1">Ask questions about your uploaded documents</p></div><div className="flex items-center gap-2"><label htmlFor="provider" className="text-sm font-medium text-gray-600">AI Model</label><select id="provider" value={provider} onChange={event => setProvider(event.target.value as LLMProvider)} disabled={loading} className="border rounded-xl px-3 py-2 bg-white outline-none disabled:bg-gray-100"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select></div></div>
         <div className="flex-1 overflow-y-auto p-8 space-y-6">
           {messages.length === 0 && <div className="max-w-2xl mx-auto text-center mt-20"><h2 className="text-2xl font-bold mb-3">How can I help?</h2><p className="text-gray-500">Upload your enterprise documents and ask questions about them.</p></div>}
           {messages.map((message, index) => <div key={index} className={message.role === "user" ? "flex justify-end" : "flex justify-start"}><div className={message.role === "user" ? "max-w-2xl bg-black text-white rounded-2xl px-5 py-4" : "max-w-3xl bg-white border rounded-2xl px-5 py-4 shadow-sm"}>{message.role === "assistant" && message.content === "" && loading ? <p className="text-gray-500">Thinking...</p> : <p className="whitespace-pre-wrap">{message.content}</p>}{message.sources && message.sources.length > 0 && <div className="mt-4 pt-4 border-t"><p className="text-sm font-semibold mb-2">Sources</p><div className="space-y-1">{message.sources.map((source, sourceIndex) => <p key={sourceIndex} className="text-sm text-gray-500">{source.source}{" — "}Page {source.page}</p>)}</div></div>}</div></div>)}
