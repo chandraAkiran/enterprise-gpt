@@ -59,7 +59,7 @@ export default function ChatPage() {
       setMessages(previous => [...previous, { role: "assistant", content: "", sources: [] }]);
 
     const fullAnswer = await streamAgentChat(
-  currentQuestion,
+  currentQuestion, provider,
 
   // ==========================================
   // STREAM ANSWER
