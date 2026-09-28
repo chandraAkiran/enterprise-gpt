@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { streamChat, Source } from "@/lib/api";
+import { streamAgentChat, Source } from "@/lib/api";
 import { createChatSession, saveChatMessage, getChatSessions, getChatMessages } from "@/lib/chat";
 
 interface Message { role: "user" | "assistant"; content: string; sources?: Source[]; }
@@ -56,19 +56,92 @@ export default function ChatPage() {
       }
       await saveChatMessage(currentSessionId!, "user", currentQuestion);
       setMessages(previous => [...previous, { role: "assistant", content: "", sources: [] }]);
-      const fullAnswer = await streamChat(
-        currentQuestion,
-        (chunk: string) => setMessages(previous => {
-          const updated = [...previous]; const i = updated.length - 1; const last = updated[i];
-          if (last?.role === "assistant") updated[i] = { ...last, content: last.content + chunk };
-          return updated;
-        }),
-        (sources: Source[]) => setMessages(previous => {
-          const updated = [...previous]; const i = updated.length - 1; const last = updated[i];
-          if (last?.role === "assistant") updated[i] = { ...last, sources };
-          return updated;
-        })
-      );
+
+    const fullAnswer = await streamAgentChat(
+  currentQuestion,
+
+  // ==========================================
+  // STREAM ANSWER
+  // ==========================================
+
+  (chunk: string) => {
+
+    setMessages(previous => {
+
+      const updated = [
+        ...previous
+      ];
+
+      const i =
+        updated.length - 1;
+
+      const last =
+        updated[i];
+
+      if (
+        last?.role ===
+        "assistant"
+      ) {
+
+        updated[i] = {
+          ...last,
+
+          content:
+            last.content + chunk,
+        };
+      }
+
+      return updated;
+    });
+  },
+
+  // ==========================================
+  // RECEIVE SOURCES
+  // ==========================================
+
+  (sources: Source[]) => {
+
+    setMessages(previous => {
+
+      const updated = [
+        ...previous
+      ];
+
+      const i =
+        updated.length - 1;
+
+      const last =
+        updated[i];
+
+      if (
+        last?.role ===
+        "assistant"
+      ) {
+
+        updated[i] = {
+          ...last,
+
+          sources:
+            sources,
+        };
+      }
+
+      return updated;
+    });
+  }
+);
+    
+            
+await saveChatMessage(
+  currentSessionId!,
+  "assistant",
+  fullAnswer
+);
+
+
+
+
+
       await saveChatMessage(currentSessionId!, "assistant", fullAnswer);
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : "Something went wrong";

@@ -59,6 +59,11 @@ from rag.langchain_chain import (
     stream_with_langchain,
 )
 
+from rag.agent import (
+    ask_agent,
+    stream_agent,
+)
+
 
 # =====================================================
 # FASTAPI APP
@@ -567,6 +572,155 @@ def chat_stream(
                 "no",
         },
     )
+
+# =====================================================
+# AGENT CHAT
+# =====================================================
+
+@app.post("/agent/chat")
+def agent_chat(
+    request: ChatRequest,
+    user=Depends(get_current_user),
+):
+
+    user_id = str(
+        user.id
+    )
+
+    if not request.question.strip():
+
+        raise HTTPException(
+            status_code=400,
+            detail="Question cannot be empty",
+        )
+
+    try:
+
+        result = ask_agent(
+            question=request.question,
+            user_id=user_id,
+        )
+
+        return result
+
+    except Exception as error:
+
+        print(
+            "Agent chat error:",
+            str(error),
+        )
+
+        error_message = str(
+            error
+        )
+
+        if (
+            "429" in error_message
+            or
+            "RESOURCE_EXHAUSTED"
+            in error_message
+            or
+            "quota" in error_message.lower()
+        ):
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Gemini API quota has "
+                    "been reached."
+                ),
+            )
+
+        if (
+            "503" in error_message
+            or
+            "UNAVAILABLE"
+            in error_message
+        ):
+
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Gemini is temporarily "
+                    "unavailable."
+                ),
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to generate "
+                "agent response"
+            ),
+        )
+
+# =====================================================
+# AGENT STREAMING CHAT
+# =====================================================
+
+@app.post("/agent/chat/stream")
+def agent_chat_stream(
+    request: ChatRequest,
+    user=Depends(get_current_user),
+):
+
+    user_id = str(
+        user.id
+    )
+
+    if not request.question.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Question cannot be empty",
+        )
+
+    def generate():
+
+        try:
+
+            response_stream = stream_agent(
+                question=request.question,
+                user_id=user_id,
+            )
+
+            for event in response_stream:
+
+                json_event = json.dumps(
+                    event,
+                    ensure_ascii=False,
+                )
+
+                yield json_event + "\n"
+
+        except Exception as error:
+
+            print(
+                "Agent streaming endpoint error:",
+                str(error),
+            )
+
+            error_event = {
+                "type": "error",
+                "message":
+                    "Failed to generate "
+                    "Agent response",
+            }
+
+            yield (
+                json.dumps(error_event)
+                + "\n"
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 
 
 

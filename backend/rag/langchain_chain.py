@@ -1,3 +1,4 @@
+import re
 from langchain_core.prompts import (
     ChatPromptTemplate
 )
@@ -104,7 +105,6 @@ Content:
         context_parts
     )
 
-
 # =====================================================
 # BUILD SOURCES
 # =====================================================
@@ -117,13 +117,41 @@ def build_sources(
 
     for metadata in metadatas:
 
+        source_name = metadata.get(
+            "source"
+        )
+
+        page = metadata.get(
+            "page"
+        )
+
+        # ---------------------------------------------
+        # Clean UUID prefixes from source filename
+        # ---------------------------------------------
+
+        if source_name:
+
+            source_name = re.sub(
+                r"^[0-9a-fA-F-]{36}_[0-9a-fA-F-]{36}_",
+                "",
+                source_name
+            )
+
+        # ---------------------------------------------
+        # Build source object
+        # ---------------------------------------------
+
         source = {
             "source":
-                metadata.get("source"),
+                source_name,
 
             "page":
-                metadata.get("page")
+                page
         }
+
+        # ---------------------------------------------
+        # Remove duplicate source/page
+        # ---------------------------------------------
 
         if source not in sources:
 
@@ -132,6 +160,8 @@ def build_sources(
             )
 
     return sources
+
+
 
 
 # =====================================================
